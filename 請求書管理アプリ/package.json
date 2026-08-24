@@ -1,0 +1,14 @@
+{
+  "name": "peops-invoice-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "peops/sunista 請求書・納品書管理アプリ",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pdfkit": "^0.19.1"
+  }
+}

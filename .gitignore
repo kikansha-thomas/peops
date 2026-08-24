@@ -1,0 +1,4 @@
+node_modules/
+.DS_Store
+請求書管理アプリ/data/app.db
+.claude/settings.local.json

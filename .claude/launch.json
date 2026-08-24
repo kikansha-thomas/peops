@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "peops-website",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["/Users/katadatomoaki/Desktop/peops office/.claude/static-server.js"],
+      "port": 8080
+    },
+    {
+      "name": "invoice-app",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["/Users/katadatomoaki/Desktop/peops office/請求書管理アプリ/server.js"],
+      "port": 8090
+    }
+  ]
+}
