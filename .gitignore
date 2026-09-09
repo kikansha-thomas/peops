@@ -2,3 +2,4 @@ node_modules/
 .DS_Store
 請求書管理アプリ/data/app.db
 .claude/settings.local.json
+請求書管理アプリ/assets/company_seal.png

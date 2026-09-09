@@ -11,6 +11,9 @@ const JP_FONT_NAME = 'HiraKakuProN-W3';
 const fmt = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
 const fmtPlain = (n) => Math.round(n).toLocaleString('ja-JP');
 
+const COMPANY_SEAL_PATH = path.join(__dirname, 'assets', 'company_seal.png');
+const hasCompanySeal = fs.existsSync(COMPANY_SEAL_PATH);
+
 function drawHeaderBlock(doc, { title, intro, number, numberLabel, issueDate, dateLabel, subject, issuer, client }) {
   const left = doc.page.margins.left;
   const right = doc.page.width - doc.page.margins.right;
@@ -40,6 +43,13 @@ function drawHeaderBlock(doc, { title, intro, number, numberLabel, issueDate, da
   // 右カラム: 発行元(自社)
   const rx = left + colWidth + 20;
   doc.fontSize(13).text(issuer.name, rx, colY, { width: colWidth });
+
+  // 社印(自社が発行元の場合のみ、会社名の右側に少し重ねて押す)
+  if (hasCompanySeal && issuer.is_self) {
+    const sealSize = 50;
+    doc.image(COMPANY_SEAL_PATH, rx + colWidth - sealSize + 6, colY - 8, { width: sealSize, height: sealSize });
+  }
+
   let ry = doc.y + 4;
   doc.fontSize(9);
   if (issuer.invoice_registration_number) {
@@ -87,20 +97,26 @@ function drawItemsTable(doc, items) {
     { key: 'amount', label: '金額', w: 0.12 },
   ].map((c) => ({ ...c, w: c.w * width }));
 
-  const rowHeight = 22;
+  const baseRowHeight = 22;
   let x = left;
   const headerY = doc.y;
   doc.fontSize(10).fillColor('#000');
   cols.forEach((c) => {
-    doc.rect(x, headerY, c.w, rowHeight).strokeColor('#999').stroke();
+    doc.rect(x, headerY, c.w, baseRowHeight).strokeColor('#999').stroke();
     doc.text(c.label, x + 4, headerY + 6, { width: c.w - 8, align: c.key === 'desc' ? 'left' : 'center' });
     x += c.w;
   });
-  let y = headerY + rowHeight;
+  let y = headerY + baseRowHeight;
 
+  const descCol = cols.find((c) => c.key === 'desc');
   const minRows = Math.max(items.length, 6);
   for (let i = 0; i < minRows; i++) {
     const it = items[i];
+    doc.fontSize(9);
+    const descText = it ? (it.description || '') : '';
+    const descHeight = descText ? doc.heightOfString(descText, { width: descCol.w - 8 }) : 0;
+    const rowHeight = Math.max(baseRowHeight, descHeight + 12);
+
     x = left;
     cols.forEach((c) => {
       doc.rect(x, y, c.w, rowHeight).strokeColor('#ccc').stroke();
@@ -210,7 +226,9 @@ function archiveDir(desktopDir, kind, issuerName, dateStr) {
     if (issuerName === '株式会社peops') return path.join(desktopDir, '2020 peops請求書', monthLabel, 'pdf');
     if (issuerName === '株式会社sunista') return path.join(desktopDir, 'sunista 請求書', monthLabel);
   } else if (issuerName === '株式会社peops') {
-    return path.join(desktopDir, 'KMC', '納品書', monthLabel);
+    // 2026-09-01よりユーザー指定で、このアプリが作る納品書は新フォルダに保存する
+    // (過去分はDesktop/KMC/納品書に残したまま、今後の分だけこちらに切り替え)
+    return path.join(desktopDir, '納品書_返品伝票', '納品書', monthLabel);
   }
   // 該当する既知アーカイブが無い場合のフォールバック(例: sunistaの納品書アーカイブ未確認)
   return path.join(desktopDir, 'peops office', '請求書_納品書テンプレート', '発行済み', kind === 'invoice' ? '請求書' : '納品書', monthLabel);
