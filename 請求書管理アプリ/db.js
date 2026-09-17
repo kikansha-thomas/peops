@@ -76,12 +76,48 @@ CREATE TABLE IF NOT EXISTS delivery_note_items (
   unit_price REAL
 );
 
+-- client_company_idは発注書では「発注先(仕入先)」の意味で使う(請求書/納品書と列名は共通、向きだけ逆)
+CREATE TABLE IF NOT EXISTS purchase_orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  po_number TEXT UNIQUE NOT NULL,
+  issuer_company_id INTEGER NOT NULL REFERENCES companies(id),
+  client_company_id INTEGER NOT NULL REFERENCES companies(id),
+  order_date TEXT NOT NULL,
+  expected_delivery_date TEXT,
+  subject TEXT,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS purchase_order_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  purchase_order_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+  sort_order INTEGER NOT NULL,
+  transaction_date TEXT,
+  description TEXT,
+  quantity REAL,
+  unit_price REAL
+);
+
 CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
 CREATE INDEX IF NOT EXISTS idx_invoices_client ON invoices(client_company_id);
 CREATE INDEX IF NOT EXISTS idx_delivery_notes_client ON delivery_notes(client_company_id);
 CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_delivery_note_items_note ON delivery_note_items(delivery_note_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_orders_client ON purchase_orders(client_company_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_order_items_po ON purchase_order_items(purchase_order_id);
 `);
+
+// 既存DBに対する後方互換マイグレーション(companiesにnext_po_noカラムを追加)
+{
+  const cols = db.prepare('PRAGMA table_info(companies)').all();
+  if (!cols.some((c) => c.name === 'next_po_no')) {
+    db.exec('ALTER TABLE companies ADD COLUMN next_po_no INTEGER');
+    // 発注書は今回が初導入のため、既存の自社(発行元)にPO-0000000001からの採番を設定
+    db.exec("UPDATE companies SET next_po_no = 1 WHERE is_self = 1 AND next_po_no IS NULL");
+  }
+}
 
 // freeeの端数処理(切り捨て)を踏襲: 消費税 = ROUNDDOWN(小計*0.1, 0)
 function computeTotals(items) {

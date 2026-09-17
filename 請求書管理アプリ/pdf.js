@@ -177,6 +177,12 @@ function drawInfoPanel(doc, rows) {
   doc.y = y + 10;
 }
 
+const KIND_LABELS = {
+  invoice: { title: '請求書', intro: '下記の通りご請求申し上げます。', numberLabel: '請求書番号', dateLabel: '請求日', totalLabel: '請求金額' },
+  delivery: { title: '納品書', intro: '下記の通り納品致します。', numberLabel: '納品書番号', dateLabel: '納品日', totalLabel: '合計金額' },
+  purchase_order: { title: '発注書', intro: '下記の通り発注いたします。', numberLabel: '発注書番号', dateLabel: '発注日', totalLabel: '発注金額' },
+};
+
 function generatePdf({ kind, number, issueDate, dueDate, subject, issuer, client, items, notes }) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 56 });
@@ -185,14 +191,14 @@ function generatePdf({ kind, number, issueDate, dueDate, subject, issuer, client
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    const isInvoice = kind === 'invoice';
+    const labels = KIND_LABELS[kind];
     drawHeaderBlock(doc, {
-      title: isInvoice ? '請求書' : '納品書',
-      intro: isInvoice ? '下記の通りご請求申し上げます。' : '下記の通り納品致します。',
+      title: labels.title,
+      intro: labels.intro,
       number,
-      numberLabel: isInvoice ? '請求書番号' : '納品書番号',
+      numberLabel: labels.numberLabel,
       issueDate,
-      dateLabel: isInvoice ? '請求日' : '納品日',
+      dateLabel: labels.dateLabel,
       subject,
       issuer,
       client,
@@ -201,12 +207,14 @@ function generatePdf({ kind, number, issueDate, dueDate, subject, issuer, client
     drawItemsTable(doc, items);
 
     const totals = require('./db.js').computeTotals(items);
-    drawTotalsBox(doc, { ...totals, totalLabel: isInvoice ? '請求金額' : '合計金額' });
+    drawTotalsBox(doc, { ...totals, totalLabel: labels.totalLabel });
 
     const infoRows = [];
-    if (isInvoice) {
+    if (kind === 'invoice') {
       infoRows.push(['入金期日', dueDate]);
       infoRows.push(['振込先', issuer.bank_info]);
+    } else if (kind === 'purchase_order') {
+      infoRows.push(['希望納期', dueDate]);
     }
     infoRows.push(['備考', notes]);
     drawInfoPanel(doc, infoRows);
@@ -225,13 +233,19 @@ function archiveDir(desktopDir, kind, issuerName, dateStr) {
   if (kind === 'invoice') {
     if (issuerName === '株式会社peops') return path.join(desktopDir, '2020 peops請求書', monthLabel, 'pdf');
     if (issuerName === '株式会社sunista') return path.join(desktopDir, 'sunista 請求書', monthLabel);
-  } else if (issuerName === '株式会社peops') {
-    // 2026-09-01よりユーザー指定で、このアプリが作る納品書は新フォルダに保存する
-    // (過去分はDesktop/KMC/納品書に残したまま、今後の分だけこちらに切り替え)
-    return path.join(desktopDir, '納品書_返品伝票', '納品書', monthLabel);
+  } else if (kind === 'delivery') {
+    if (issuerName === '株式会社peops') {
+      // 2026-09-01よりユーザー指定で、このアプリが作る納品書は新フォルダに保存する
+      // (過去分はDesktop/KMC/納品書に残したまま、今後の分だけこちらに切り替え)
+      return path.join(desktopDir, '納品書_返品伝票', '納品書', monthLabel);
+    }
+  } else if (kind === 'purchase_order') {
+    // 2026-09-17よりユーザー指定でDesktop直下に発注書専用フォルダを新設(請求書・納品書と同じ運用)
+    return path.join(desktopDir, '発注書', monthLabel);
   }
   // 該当する既知アーカイブが無い場合のフォールバック(例: sunistaの納品書アーカイブ未確認)
-  return path.join(desktopDir, 'peops office', '請求書_納品書テンプレート', '発行済み', kind === 'invoice' ? '請求書' : '納品書', monthLabel);
+  const kindLabel = kind === 'invoice' ? '請求書' : kind === 'purchase_order' ? '発注書' : '納品書';
+  return path.join(desktopDir, 'peops office', '請求書_納品書テンプレート', '発行済み', kindLabel, monthLabel);
 }
 
 function saveInvoicePdfToArchive(desktopDir, kind, issuerName, dateStr, fileBaseName, buffer) {

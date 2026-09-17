@@ -11,18 +11,38 @@ app.use(express.static(path.join(__dirname, 'public')));
 const now = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
 
+// 書類種別ごとの差分をここに集約する。請求書/納品書は取引先(client)への発行、
+// 発注書は取引先(client=発注先・仕入先)への発行で、issuer(自社)から見た向きは共通のため
+// 同じcompanies.client_company_id列を「相手方」として使い回している。
+const DOC_KINDS = {
+  invoice: {
+    table: 'invoices', itemsTable: 'invoice_items', fk: 'invoice_id',
+    numberField: 'invoice_number', dateField: 'issue_date', prefix: 'INV', counterField: 'next_invoice_no',
+    hasDueDate: true, dueDateField: 'due_date', label: '請求書', segment: 'invoices',
+  },
+  delivery: {
+    table: 'delivery_notes', itemsTable: 'delivery_note_items', fk: 'delivery_note_id',
+    numberField: 'delivery_number', dateField: 'delivery_date', prefix: 'DEL', counterField: 'next_delivery_no',
+    hasDueDate: false, label: '納品書', segment: 'delivery-notes',
+  },
+  purchase_order: {
+    table: 'purchase_orders', itemsTable: 'purchase_order_items', fk: 'purchase_order_id',
+    numberField: 'po_number', dateField: 'order_date', prefix: 'PO', counterField: 'next_po_no',
+    hasDueDate: true, dueDateField: 'expected_delivery_date', label: '発注書', segment: 'purchase-orders',
+  },
+};
+
 function getCompany(id) {
   return db.prepare('SELECT * FROM companies WHERE id = ?').get(id);
 }
 
 function assignNextNumber(issuerId, kind) {
-  const field = kind === 'invoice' ? 'next_invoice_no' : 'next_delivery_no';
-  const prefix = kind === 'invoice' ? 'INV' : 'DEL';
+  const { counterField: field, prefix, label } = DOC_KINDS[kind];
   const issuer = getCompany(issuerId);
   if (!issuer) throw Object.assign(new Error('発行元の取引先が見つかりません'), { status: 400 });
   if (issuer[field] == null) {
     throw Object.assign(
-      new Error(`${issuer.name}の${kind === 'invoice' ? '請求書' : '納品書'}番号の連番が未設定です。取引先編集画面で次回番号を設定してください。`),
+      new Error(`${issuer.name}の${label}番号の連番が未設定です。取引先編集画面で次回番号を設定してください。`),
       { status: 400 }
     );
   }
@@ -52,7 +72,7 @@ app.get('/api/companies/:id', (req, res) => {
 const COMPANY_FIELDS = [
   'name', 'billing_name', 'postal_code', 'address', 'building_tel_fax', 'contact_person',
   'email', 'payment_terms', 'bank_info', 'invoice_registration_number', 'notes',
-  'is_self', 'next_invoice_no', 'next_delivery_no',
+  'is_self', 'next_invoice_no', 'next_delivery_no', 'next_po_no',
 ];
 
 app.post('/api/companies', (req, res) => {
@@ -82,21 +102,18 @@ app.delete('/api/companies/:id', (req, res) => {
   const id = req.params.id;
   const usedAsInvoice = db.prepare('SELECT COUNT(*) c FROM invoices WHERE issuer_company_id = ? OR client_company_id = ?').get(id, id).c;
   const usedAsDelivery = db.prepare('SELECT COUNT(*) c FROM delivery_notes WHERE issuer_company_id = ? OR client_company_id = ?').get(id, id).c;
-  if (usedAsInvoice > 0 || usedAsDelivery > 0) {
-    return res.status(400).json({ error: 'この取引先には請求書・納品書の履歴があるため削除できません' });
+  const usedAsPurchaseOrder = db.prepare('SELECT COUNT(*) c FROM purchase_orders WHERE issuer_company_id = ? OR client_company_id = ?').get(id, id).c;
+  if (usedAsInvoice > 0 || usedAsDelivery > 0 || usedAsPurchaseOrder > 0) {
+    return res.status(400).json({ error: 'この取引先には請求書・納品書・発注書の履歴があるため削除できません' });
   }
   db.prepare('DELETE FROM companies WHERE id = ?').run(id);
   res.status(204).end();
 });
 
-// ---------- shared invoice/delivery-note logic ----------
+// ---------- shared invoice/delivery-note/purchase-order logic ----------
 
 function listDocs(kind, companyId) {
-  const table = kind === 'invoice' ? 'invoices' : 'delivery_notes';
-  const numberField = kind === 'invoice' ? 'invoice_number' : 'delivery_number';
-  const dateField = kind === 'invoice' ? 'issue_date' : 'delivery_date';
-  const itemsTable = kind === 'invoice' ? 'invoice_items' : 'delivery_note_items';
-  const fkField = kind === 'invoice' ? 'invoice_id' : 'delivery_note_id';
+  const { table, itemsTable, fk: fkField, dateField } = DOC_KINDS[kind];
   const rows = db.prepare(`SELECT * FROM ${table} WHERE client_company_id = ? ORDER BY ${dateField} DESC, id DESC`).all(companyId);
   return rows.map((r) => {
     const items = db.prepare(`SELECT * FROM ${itemsTable} WHERE ${fkField} = ? ORDER BY sort_order`).all(r.id);
@@ -105,9 +122,7 @@ function listDocs(kind, companyId) {
 }
 
 function getDoc(kind, id) {
-  const table = kind === 'invoice' ? 'invoices' : 'delivery_notes';
-  const itemsTable = kind === 'invoice' ? 'invoice_items' : 'delivery_note_items';
-  const fkField = kind === 'invoice' ? 'invoice_id' : 'delivery_note_id';
+  const { table, itemsTable, fk: fkField } = DOC_KINDS[kind];
   const doc = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id);
   if (!doc) return null;
   const items = db.prepare(`SELECT * FROM ${itemsTable} WHERE ${fkField} = ? ORDER BY sort_order`).all(id);
@@ -115,18 +130,14 @@ function getDoc(kind, id) {
 }
 
 function createDoc(kind, body) {
-  const table = kind === 'invoice' ? 'invoices' : 'delivery_notes';
-  const itemsTable = kind === 'invoice' ? 'invoice_items' : 'delivery_note_items';
-  const fkField = kind === 'invoice' ? 'invoice_id' : 'delivery_note_id';
-  const numberField = kind === 'invoice' ? 'invoice_number' : 'delivery_number';
-  const dateField = kind === 'invoice' ? 'issue_date' : 'delivery_date';
+  const { table, itemsTable, fk: fkField, numberField, dateField, hasDueDate, dueDateField, label } = DOC_KINDS[kind];
 
   if (!body.issuer_company_id || !body.client_company_id) {
-    throw Object.assign(new Error('発行元・請求先(納品先)は必須です'), { status: 400 });
+    throw Object.assign(new Error(`発行元・相手先は必須です(${label})`), { status: 400 });
   }
   const number = body.invoice_number_override || assignNextNumber(body.issuer_company_id, kind);
-  const cols = kind === 'invoice'
-    ? [numberField, 'issuer_company_id', 'client_company_id', dateField, 'due_date', 'subject', 'notes']
+  const cols = hasDueDate
+    ? [numberField, 'issuer_company_id', 'client_company_id', dateField, dueDateField, 'subject', 'notes']
     : [numberField, 'issuer_company_id', 'client_company_id', dateField, 'subject', 'notes'];
   const values = cols.map((c) => {
     if (c === numberField) return number;
@@ -148,15 +159,12 @@ function createDoc(kind, body) {
 }
 
 function updateDoc(kind, id, body) {
-  const table = kind === 'invoice' ? 'invoices' : 'delivery_notes';
-  const itemsTable = kind === 'invoice' ? 'invoice_items' : 'delivery_note_items';
-  const fkField = kind === 'invoice' ? 'invoice_id' : 'delivery_note_id';
-  const dateField = kind === 'invoice' ? 'issue_date' : 'delivery_date';
+  const { table, itemsTable, fk: fkField, dateField, hasDueDate, dueDateField } = DOC_KINDS[kind];
   const existing = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id);
   if (!existing) return null;
 
-  const cols = kind === 'invoice'
-    ? ['issuer_company_id', 'client_company_id', dateField, 'due_date', 'subject', 'notes']
+  const cols = hasDueDate
+    ? ['issuer_company_id', 'client_company_id', dateField, dueDateField, 'subject', 'notes']
     : ['issuer_company_id', 'client_company_id', dateField, 'subject', 'notes'];
   const sets = cols.map((c) => `${c} = ?`).join(', ');
   const values = cols.map((c) => (body[c] !== undefined ? body[c] : existing[c]));
@@ -177,12 +185,10 @@ function updateDoc(kind, id, body) {
 function duplicateDoc(kind, id) {
   const src = getDoc(kind, id);
   if (!src) return null;
-  return createDoc(kind, {
+  const { dateField, hasDueDate, dueDateField } = DOC_KINDS[kind];
+  const body = {
     issuer_company_id: src.issuer_company_id,
     client_company_id: src.client_company_id,
-    issue_date: today(),
-    delivery_date: today(),
-    due_date: null,
     subject: src.subject,
     notes: src.notes,
     items: src.items.map((it) => ({
@@ -191,17 +197,21 @@ function duplicateDoc(kind, id) {
       quantity: it.quantity,
       unit_price: it.unit_price,
     })),
-  });
+  };
+  body[dateField] = today();
+  if (hasDueDate) body[dueDateField] = null;
+  return createDoc(kind, body);
 }
 
 async function docPdfBuffer(kind, doc) {
+  const { numberField, dateField, hasDueDate, dueDateField } = DOC_KINDS[kind];
   const issuer = getCompany(doc.issuer_company_id);
   const client = getCompany(doc.client_company_id);
   return generatePdf({
     kind,
-    number: kind === 'invoice' ? doc.invoice_number : doc.delivery_number,
-    issueDate: kind === 'invoice' ? doc.issue_date : doc.delivery_date,
-    dueDate: doc.due_date,
+    number: doc[numberField],
+    issueDate: doc[dateField],
+    dueDate: hasDueDate ? doc[dueDateField] : null,
     subject: doc.subject,
     issuer,
     client,
@@ -210,7 +220,8 @@ async function docPdfBuffer(kind, doc) {
   });
 }
 
-function registerDocRoutes(kind, segment) {
+function registerDocRoutes(kind) {
+  const { segment, numberField, dateField, label } = DOC_KINDS[kind];
   const basePath = `/api/${segment}`;
 
   app.get(`/api/companies/:companyId/${segment}`, (req, res) => {
@@ -238,8 +249,7 @@ function registerDocRoutes(kind, segment) {
   });
 
   app.delete(`${basePath}/:id`, (req, res) => {
-    const table = kind === 'invoice' ? 'invoices' : 'delivery_notes';
-    db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(req.params.id);
+    db.prepare(`DELETE FROM ${DOC_KINDS[kind].table} WHERE id = ?`).run(req.params.id);
     res.status(204).end();
   });
 
@@ -258,11 +268,11 @@ function registerDocRoutes(kind, segment) {
     if (!doc) return res.status(404).json({ error: 'not found' });
     try {
       const buffer = await docPdfBuffer(kind, doc);
-      const number = kind === 'invoice' ? doc.invoice_number : doc.delivery_number;
-      const dateStr = kind === 'invoice' ? doc.issue_date : doc.delivery_date;
+      const number = doc[numberField];
+      const dateStr = doc[dateField];
       const client = getCompany(doc.client_company_id);
       const issuer = getCompany(doc.issuer_company_id);
-      const fileBase = `${client.name}御中_${kind === 'invoice' ? '請求書' : '納品書'}_${number}`;
+      const fileBase = `${client.name}御中_${label}_${number}`;
       saveInvoicePdfToArchive(DESKTOP_DIR, kind, issuer.name, dateStr, fileBase, buffer);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileBase)}.pdf"`);
@@ -273,8 +283,9 @@ function registerDocRoutes(kind, segment) {
   });
 }
 
-registerDocRoutes('invoice', 'invoices');
-registerDocRoutes('delivery', 'delivery-notes');
+registerDocRoutes('invoice');
+registerDocRoutes('delivery');
+registerDocRoutes('purchase_order');
 
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/')) return next();

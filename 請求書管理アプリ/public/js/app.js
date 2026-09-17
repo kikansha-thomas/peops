@@ -33,6 +33,26 @@ function closeModal() {
   modalRoot.innerHTML = '';
 }
 
+// 書類種別ごとの表示差分(サーバー側のDOC_KINDSと対応)
+const DOC_KIND_META = {
+  invoice: {
+    segment: 'invoices', label: '請求書', numberField: 'invoice_number', dateField: 'issue_date',
+    dateLabel: '請求日', partnerLabel: '請求先', hasDueDate: true, dueDateField: 'due_date', dueDateLabel: '入金期日',
+    totalLabel: '請求金額',
+  },
+  delivery: {
+    segment: 'delivery-notes', label: '納品書', numberField: 'delivery_number', dateField: 'delivery_date',
+    dateLabel: '納品日', partnerLabel: '納品先', hasDueDate: false,
+    totalLabel: '合計金額',
+  },
+  purchase_order: {
+    segment: 'purchase-orders', label: '発注書', numberField: 'po_number', dateField: 'order_date',
+    dateLabel: '発注日', partnerLabel: '発注先', hasDueDate: true, dueDateField: 'expected_delivery_date', dueDateLabel: '希望納期',
+    totalLabel: '発注金額',
+  },
+};
+const DOC_KIND_ORDER = ['invoice', 'delivery', 'purchase_order'];
+
 function showModal(html, { wide } = {}) {
   modalRoot.innerHTML = `<div class="modal-backdrop"><div class="modal ${wide ? 'modal-wide' : ''}">${html}</div></div>`;
   modalRoot.querySelector('.modal-backdrop').addEventListener('click', (e) => {
@@ -138,6 +158,7 @@ function companyFormFields(c = {}) {
       <div class="form-field"><label><input type="checkbox" id="f-is_self" ${c.is_self ? 'checked' : ''} style="width:auto;display:inline-block;margin-right:6px;">自社(発行元として使う)</label></div>
       <div class="form-field" id="wrap-next_invoice_no"><label>次回請求書番号(INV-)</label><input type="number" id="f-next_invoice_no" value="${c.next_invoice_no ?? ''}"></div>
       <div class="form-field" id="wrap-next_delivery_no"><label>次回納品書番号(DEL-)</label><input type="number" id="f-next_delivery_no" value="${c.next_delivery_no ?? ''}"></div>
+      <div class="form-field" id="wrap-next_po_no"><label>次回発注書番号(PO-)</label><input type="number" id="f-next_po_no" value="${c.next_po_no ?? ''}"></div>
     </div>
   `;
 }
@@ -159,6 +180,7 @@ function readCompanyForm() {
     is_self: document.getElementById('f-is_self').checked ? 1 : 0,
     next_invoice_no: val('f-next_invoice_no') === '' ? null : Number(val('f-next_invoice_no')),
     next_delivery_no: val('f-next_delivery_no') === '' ? null : Number(val('f-next_delivery_no')),
+    next_po_no: val('f-next_po_no') === '' ? null : Number(val('f-next_po_no')),
   };
 }
 
@@ -205,11 +227,14 @@ function openCompanyForm(existing, onSaved) {
 // ---------- company detail ----------
 
 async function renderCompanyDetail(id, tab) {
-  const [company, invoices, deliveryNotes] = await Promise.all([
+  const [company, invoices, deliveryNotes, purchaseOrders] = await Promise.all([
     api(`/api/companies/${id}`),
     api(`/api/companies/${id}/invoices`),
     api(`/api/companies/${id}/delivery-notes`),
+    api(`/api/companies/${id}/purchase-orders`),
   ]);
+  const docsByKind = { invoice: invoices, delivery: deliveryNotes, purchase_order: purchaseOrders };
+  if (!DOC_KIND_ORDER.some((k) => DOC_KIND_META[k].segment === tab)) tab = 'invoices';
 
   mainEl.innerHTML = `
     <div class="breadcrumb"><a href="#/companies">請求書・納品書管理</a> / ${escapeHtml(company.name)}</div>
@@ -233,8 +258,10 @@ async function renderCompanyDetail(id, tab) {
     </div>
 
     <div class="tabs">
-      <button class="tab-btn ${tab === 'invoices' ? 'active' : ''}" data-tab="invoices">請求書一覧 (${invoices.length})</button>
-      <button class="tab-btn ${tab === 'delivery-notes' ? 'active' : ''}" data-tab="delivery-notes">納品書一覧 (${deliveryNotes.length})</button>
+      ${DOC_KIND_ORDER.map((k) => {
+        const meta = DOC_KIND_META[k];
+        return `<button class="tab-btn ${tab === meta.segment ? 'active' : ''}" data-tab="${meta.segment}">${meta.label}一覧 (${docsByKind[k].length})</button>`;
+      }).join('')}
     </div>
     <div id="tab-content"></div>
   `;
@@ -249,14 +276,14 @@ async function renderCompanyDetail(id, tab) {
     });
   });
 
-  if (tab === 'delivery-notes') renderDocTable('delivery', id, deliveryNotes, company);
-  else renderDocTable('invoice', id, invoices, company);
+  const activeKind = DOC_KIND_ORDER.find((k) => DOC_KIND_META[k].segment === tab);
+  renderDocTable(activeKind, id, docsByKind[activeKind], company);
 }
 
 function renderDocTable(kind, companyId, docs, company) {
   const container = document.getElementById('tab-content');
-  const isInvoice = kind === 'invoice';
-  const label = isInvoice ? '請求書' : '納品書';
+  const meta = DOC_KIND_META[kind];
+  const label = meta.label;
 
   container.innerHTML = `
     <div class="toolbar">
@@ -266,13 +293,13 @@ function renderDocTable(kind, companyId, docs, company) {
     ${docs.length === 0 ? `<div class="empty-state">まだ${label}がありません</div>` : `
     <table>
       <thead><tr>
-        <th>${label}番号</th><th>${isInvoice ? '請求日' : '納品日'}</th><th>件名</th><th>金額</th><th></th>
+        <th>${label}番号</th><th>${meta.dateLabel}</th><th>件名</th><th>金額</th><th></th>
       </tr></thead>
       <tbody>
         ${docs.map((d) => `
           <tr data-id="${d.id}">
-            <td>${escapeHtml(isInvoice ? d.invoice_number : d.delivery_number)}</td>
-            <td>${escapeHtml(isInvoice ? d.issue_date : d.delivery_date)}</td>
+            <td>${escapeHtml(d[meta.numberField])}</td>
+            <td>${escapeHtml(d[meta.dateField])}</td>
             <td>${escapeHtml(d.subject || '')}</td>
             <td class="num">${yen(d.totals.total)}</td>
             <td>
@@ -291,41 +318,41 @@ function renderDocTable(kind, companyId, docs, company) {
   `;
 
   document.getElementById('btn-new-doc').addEventListener('click', () => {
-    openDocForm(kind, companyId, company, null, () => renderCompanyDetail(companyId, isInvoice ? 'invoices' : 'delivery-notes'));
+    openDocForm(kind, companyId, company, null, () => renderCompanyDetail(companyId, meta.segment));
   });
 
   container.querySelectorAll('tr[data-id]').forEach((row) => {
     const docId = row.dataset.id;
     row.querySelector('[data-action="edit"]').addEventListener('click', async () => {
-      const doc = await api(`/api/${isInvoice ? 'invoices' : 'delivery-notes'}/${docId}`);
-      openDocForm(kind, companyId, company, doc, () => renderCompanyDetail(companyId, isInvoice ? 'invoices' : 'delivery-notes'));
+      const doc = await api(`/api/${meta.segment}/${docId}`);
+      openDocForm(kind, companyId, company, doc, () => renderCompanyDetail(companyId, meta.segment));
     });
     row.querySelector('[data-action="duplicate"]').addEventListener('click', async () => {
       try {
-        await api(`/api/${isInvoice ? 'invoices' : 'delivery-notes'}/${docId}/duplicate`, { method: 'POST' });
-        await renderCompanyDetail(companyId, isInvoice ? 'invoices' : 'delivery-notes');
+        await api(`/api/${meta.segment}/${docId}/duplicate`, { method: 'POST' });
+        await renderCompanyDetail(companyId, meta.segment);
       } catch (e) {
         alert(e.message);
       }
     });
     row.querySelector('[data-action="pdf"]').addEventListener('click', () => {
-      window.open(`/api/${isInvoice ? 'invoices' : 'delivery-notes'}/${docId}/pdf`, '_blank');
+      window.open(`/api/${meta.segment}/${docId}/pdf`, '_blank');
     });
     row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
       if (!confirm(`この${label}を削除しますか？`)) return;
-      await api(`/api/${isInvoice ? 'invoices' : 'delivery-notes'}/${docId}`, { method: 'DELETE' });
-      await renderCompanyDetail(companyId, isInvoice ? 'invoices' : 'delivery-notes');
+      await api(`/api/${meta.segment}/${docId}`, { method: 'DELETE' });
+      await renderCompanyDetail(companyId, meta.segment);
     });
   });
 }
 
-// ---------- doc (invoice / delivery note) form ----------
+// ---------- doc (invoice / delivery note / purchase order) form ----------
 
 async function openDocForm(kind, companyId, company, existing, onSaved) {
-  const isInvoice = kind === 'invoice';
+  const meta = DOC_KIND_META[kind];
   const issuers = await api('/api/companies?role=self');
   const items = existing ? existing.items.map((it) => ({ ...it })) : [{ transaction_date: '', description: '', quantity: 1, unit_price: 0 }];
-  const dateField = isInvoice ? 'issue_date' : 'delivery_date';
+  const dateField = meta.dateField;
   const today = new Date().toISOString().slice(0, 10);
 
   function itemsRowsHtml() {
@@ -342,7 +369,7 @@ async function openDocForm(kind, companyId, company, existing, onSaved) {
   }
 
   showModal(`
-    <h2>${existing ? '' : '新規'}${isInvoice ? '請求書' : '納品書'}${existing ? '編集' : ''}</h2>
+    <h2>${existing ? '' : '新規'}${meta.label}${existing ? '編集' : ''}</h2>
     <div id="doc-form-error"></div>
     <div class="form-grid">
       <div class="form-field">
@@ -351,9 +378,9 @@ async function openDocForm(kind, companyId, company, existing, onSaved) {
           ${issuers.map((i) => `<option value="${i.id}" ${existing ? (existing.issuer_company_id === i.id ? 'selected' : '') : (i.name === '株式会社peops' ? 'selected' : '')}>${escapeHtml(i.name)}</option>`).join('')}
         </select>
       </div>
-      <div class="form-field"><label>${isInvoice ? '請求先' : '納品先'}</label><input type="text" value="${escapeHtml(company.name)}" disabled></div>
-      <div class="form-field"><label>${isInvoice ? '請求日' : '納品日'}</label><input type="date" id="f-date" value="${existing ? existing[dateField] : today}"></div>
-      ${isInvoice ? `<div class="form-field"><label>入金期日</label><input type="date" id="f-due" value="${existing && existing.due_date ? existing.due_date : ''}"></div>` : '<div></div>'}
+      <div class="form-field"><label>${meta.partnerLabel}</label><input type="text" value="${escapeHtml(company.name)}" disabled></div>
+      <div class="form-field"><label>${meta.dateLabel}</label><input type="date" id="f-date" value="${existing ? existing[dateField] : today}"></div>
+      ${meta.hasDueDate ? `<div class="form-field"><label>${meta.dueDateLabel}</label><input type="date" id="f-due" value="${existing && existing[meta.dueDateField] ? existing[meta.dueDateField] : ''}"></div>` : '<div></div>'}
       <div class="form-field full"><label>件名</label><input type="text" id="f-subject" value="${escapeHtml(existing ? existing.subject || '' : '')}"></div>
     </div>
 
@@ -388,7 +415,7 @@ async function openDocForm(kind, companyId, company, existing, onSaved) {
     document.getElementById('totals-box').innerHTML = `
       <div class="line"><span>小計</span><span>${yen(t.subtotal)}</span></div>
       <div class="line"><span>消費税(10%)</span><span>${yen(t.tax)}</span></div>
-      <div class="line total"><span>${isInvoice ? '請求金額' : '合計金額'}</span><span>${yen(t.total)}</span></div>
+      <div class="line total"><span>${meta.totalLabel}</span><span>${yen(t.total)}</span></div>
     `;
     document.querySelectorAll('#items-body tr').forEach((row, idx) => {
       const q = Number(row.querySelector('.it-qty').value) || 0;
@@ -438,12 +465,12 @@ async function openDocForm(kind, companyId, company, existing, onSaved) {
         items: readItemsFromDom().filter((it) => it.description || it.quantity || it.unit_price),
       };
       body[dateField] = document.getElementById('f-date').value;
-      if (isInvoice) body.due_date = document.getElementById('f-due').value || null;
+      if (meta.hasDueDate) body[meta.dueDateField] = document.getElementById('f-due').value || null;
 
       if (existing) {
-        await api(`/api/${isInvoice ? 'invoices' : 'delivery-notes'}/${existing.id}`, { method: 'PUT', body: JSON.stringify(body) });
+        await api(`/api/${meta.segment}/${existing.id}`, { method: 'PUT', body: JSON.stringify(body) });
       } else {
-        await api(`/api/${isInvoice ? 'invoices' : 'delivery-notes'}`, { method: 'POST', body: JSON.stringify(body) });
+        await api(`/api/${meta.segment}`, { method: 'POST', body: JSON.stringify(body) });
       }
       closeModal();
       if (onSaved) await onSaved();
